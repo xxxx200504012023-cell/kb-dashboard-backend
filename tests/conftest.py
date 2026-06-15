@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 MCP_SERVER = Path("E:/knowledge-base/mcp-server")
 if str(MCP_SERVER) not in sys.path:
     sys.path.insert(0, str(MCP_SERVER))

@@ -1,5 +1,6 @@
 """Routes for /api/projects."""
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 import kb_service
 from routes.helpers import sanitize_error, validate_project_name
@@ -7,20 +8,23 @@ from routes.helpers import sanitize_error, validate_project_name
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
+class CreateProjectRequest(BaseModel):
+    name: str
+    project_type: str = "backend"
+
+
 @router.get("")
 def list_projects():
     projects = kb_service.list_projects()
-    return {"projects": [{"name": p, "type": "backend"} for p in projects]}
+    return {"projects": [{"name": p, "type": kb_service.get_project_type(p)} for p in projects]}
 
 
 @router.post("", status_code=201)
-def create_project(body: dict):
-    name = body.get("name", "")
-    err = validate_project_name(name)
+def create_project(body: CreateProjectRequest):
+    err = validate_project_name(body.name)
     if err:
         raise HTTPException(status_code=422, detail=err)
-    project_type = body.get("project_type", "backend")
-    result = kb_service.init_project(name, project_type)
+    result = kb_service.init_project(body.name, body.project_type)
     if "error" in result:
         if "already exists" in result["error"]:
             raise HTTPException(status_code=409, detail=sanitize_error(result["error"]))
@@ -30,6 +34,9 @@ def create_project(body: dict):
 
 @router.get("/{name}")
 def get_project(name: str):
+    err = validate_project_name(name)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
     result = kb_service.get_project(name)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Project '{name}' not found")

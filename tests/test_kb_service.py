@@ -1,23 +1,8 @@
 """Tests for kb_service.py — wraps KB MCP modules."""
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
-
-def _create_task(root: Path, task_id: str, project: str, task_type: str = "backend"):
-    content = f"""---
-id: {task_id}
-project: {project}
-type: {task_type}
-status: pending
-created_at: {datetime.now(timezone.utc).isoformat()}
----
-
-# {task_id}
-Task description.
-"""
-    (root / "tasks" / "backlog" / f"{task_id}.md").write_text(content, encoding="utf-8")
+from conftest import create_task_file
 
 
 @pytest.fixture
@@ -126,34 +111,34 @@ class TestTaskOperations:
         assert result["done"] == []
 
     def test_get_tasks_with_items(self, kb_service, kb_root):
-        _create_task(kb_root, "task-01", "myproject")
+        create_task_file(kb_root, "task-01", "myproject")
         result = kb_service.get_tasks("myproject")
         assert len(result["backlog"]) == 1
         assert result["backlog"][0]["id"] == "task-01"
 
     def test_claim_task(self, kb_service, kb_root):
-        _create_task(kb_root, "task-02", "myproject")
+        create_task_file(kb_root, "task-02", "myproject")
         result = kb_service.claim_task("task-02", "claude-code")
         assert "OK" in result
         assert not (kb_root / "tasks" / "backlog" / "task-02.md").exists()
         assert (kb_root / "tasks" / "in-progress" / "task-02.md").exists()
 
     def test_complete_task(self, kb_service, kb_root):
-        _create_task(kb_root, "task-03", "myproject")
+        create_task_file(kb_root, "task-03", "myproject")
         kb_service.claim_task("task-03", "claude-code")
         result = kb_service.complete_task("task-03", "Done!")
         assert "OK" in result
         assert (kb_root / "tasks" / "done" / "task-03.md").exists()
 
     def test_get_next_task(self, kb_service, kb_root):
-        _create_task(kb_root, "task-04", "myproject")
+        create_task_file(kb_root, "task-04", "myproject")
         result = kb_service.get_next_task("myproject")
         assert result is not None
         assert "task-04" in result["id"]
 
     def test_get_next_task_filtered(self, kb_service, kb_root):
-        _create_task(kb_root, "task-05", "myproject", "frontend")
-        _create_task(kb_root, "task-06", "myproject", "backend")
+        create_task_file(kb_root, "task-05", "myproject", "frontend")
+        create_task_file(kb_root, "task-06", "myproject", "backend")
         result = kb_service.get_next_task("myproject", "frontend")
         assert result is not None
         assert result["id"] == "task-05"

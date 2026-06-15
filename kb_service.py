@@ -1,6 +1,7 @@
 """Service layer wrapping KB MCP Server modules for the dashboard backend."""
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from task_tools import _task_status, _task_next, _task_claim, _task_complete  # 
 from project_tools import _list_projects, _init_project             # noqa: E402
 from security import SecurityError                                    # noqa: E402
 from config import PROJECTS_DIR                                      # noqa: E402
+
+_TASKS_DIR = PROJECTS_DIR.parent / "tasks"
 
 
 def list_projects() -> list[str]:
@@ -34,6 +37,25 @@ def init_project(name: str, project_type: str = "backend") -> dict:
     lines = raw.strip().split("\n")
     created = [line.lstrip("  + ") for line in lines if line.startswith("  +")]
     return {"name": name, "created": created}
+
+
+def _get_task_project(task_id: str) -> str | None:
+    """Extract the project field from a task file's frontmatter. Returns None if not found."""
+    for stage in ["backlog", "in-progress", "done"]:
+        task_file = _TASKS_DIR / stage / f"{task_id}.md"
+        if task_file.exists():
+            content = task_file.read_text(encoding="utf-8")
+            match = re.search(r"^project:\s*(.+)$", content, re.MULTILINE)
+            return match.group(1).strip() if match else None
+    return None
+
+
+def get_project_type(name: str) -> str:
+    """Detect project type from directory contents. Returns 'frontend' or 'backend'."""
+    proj_dir = PROJECTS_DIR / name
+    if (proj_dir / "CODEX.md").exists():
+        return "frontend"
+    return "backend"
 
 
 def get_project(name: str) -> dict | None:
@@ -97,7 +119,9 @@ def get_tasks(project: str) -> dict:
                 current_section = key
                 break
         if line.startswith("- [") and current_section:
-            bracket_end = line.index("]")
+            bracket_end = line.find("]")
+            if bracket_end == -1:
+                continue
             task_id = line[3:bracket_end]
             title = line[bracket_end + 2:].strip()
             result[current_section].append({"id": task_id, "title": title})
@@ -124,11 +148,19 @@ def get_next_task(project: str, task_type: str | None = None) -> dict | None:
     return {"id": task_id, "body": body}
 
 
-def claim_task(task_id: str, assigned_to: str = "claude-code") -> str:
-    """Claim a task: move from backlog to in-progress."""
+def claim_task(task_id: str, assigned_to: str = "claude-code", project: str | None = None) -> str:
+    """Claim a task: move from backlog to in-progress. Optionally validate project ownership."""
+    if project:
+        task_project = _get_task_project(task_id)
+        if task_project and task_project != project:
+            return f"ERROR: Task '{task_id}' does not belong to project '{project}'"
     return _task_claim(task_id, assigned_to)
 
 
-def complete_task(task_id: str, summary: str = "") -> str:
-    """Mark a task as done."""
+def complete_task(task_id: str, summary: str = "", project: str | None = None) -> str:
+    """Mark a task as done. Optionally validate project ownership."""
+    if project:
+        task_project = _get_task_project(task_id)
+        if task_project and task_project != project:
+            return f"ERROR: Task '{task_id}' does not belong to project '{project}'"
     return _task_complete(task_id, summary)

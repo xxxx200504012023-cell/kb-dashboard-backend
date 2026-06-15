@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException, Request, Query, Response
 
 import kb_service
-from routes.helpers import sanitize_error
+from routes.helpers import sanitize_error, validate_project_name
 
 router = APIRouter(prefix="/api/projects", tags=["files"])
 
@@ -22,8 +22,29 @@ def _validate_file_path(path: str) -> str | None:
     return None
 
 
+def _validate_project(name: str, handler: str) -> None:
+    """Validate project name and raise HTTPException on failure."""
+    err = validate_project_name(name)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+
+
+async def _read_body_bounded(request: Request, max_size: int = MAX_CONTENT_SIZE) -> bytes:
+    """Read request body with a hard size cap using stream() to prevent DoS."""
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > max_size:
+        raise HTTPException(status_code=413, detail="Content too large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > max_size:
+            raise HTTPException(status_code=413, detail="Content too large")
+    return bytes(body)
+
+
 @router.get("/{name}/files/{path:path}")
 def read_file(name: str, path: str):
+    _validate_project(name, "read_file")
     err = _validate_file_path(path)
     if err:
         raise HTTPException(status_code=400, detail=err)
@@ -37,17 +58,15 @@ def read_file(name: str, path: str):
 
 @router.put("/{name}/files/{path:path}")
 async def write_file(name: str, path: str, request: Request):
+    _validate_project(name, "write_file")
     err = _validate_file_path(path)
     if err:
         raise HTTPException(status_code=400, detail=err)
-    # Check Content-Length before reading body to avoid memory exhaustion
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_CONTENT_SIZE:
-        raise HTTPException(status_code=413, detail="Content too large")
-    content = await request.body()
-    text = content.decode("utf-8")
-    if len(text.encode("utf-8")) > MAX_CONTENT_SIZE:
-        raise HTTPException(status_code=413, detail="Content too large")
+    raw = await _read_body_bounded(request)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="File content must be valid UTF-8")
     result = kb_service.write_file(path, text, name)
     if result.startswith("ERROR:"):
         raise HTTPException(status_code=400, detail=sanitize_error(result))
@@ -56,5 +75,6 @@ async def write_file(name: str, path: str, request: Request):
 
 @router.get("/{name}/search")
 def search_files(name: str, q: str = Query(..., min_length=1)):
+    _validate_project(name, "search_files")
     results = kb_service.search_files(q, name)
     return {"query": q, "results": results}
