@@ -15,7 +15,8 @@ from file_tools import _read_file, _write_file, _search_kb        # noqa: E402
 from task_tools import _task_status, _task_next, _task_claim, _task_complete  # noqa: E402
 from project_tools import _list_projects, _init_project             # noqa: E402
 from security import SecurityError                                    # noqa: E402
-from config import PROJECTS_DIR                                      # noqa: E402
+from config import PROJECTS_DIR, KB_ROOT                            # noqa: E402
+from schemas import GlobalStats, ProjectStats, RecentActivity        # noqa: E402
 
 _TASKS_DIR = PROJECTS_DIR.parent / "tasks"
 
@@ -164,3 +165,143 @@ def complete_task(task_id: str, summary: str = "", project: str | None = None) -
         if task_project and task_project != project:
             return f"ERROR: Task '{task_id}' does not belong to project '{project}'"
     return _task_complete(task_id, summary)
+
+
+# -- Stats Aggregation --
+
+_MAX_STATS_FILES = 1000
+_MAX_STATS_FILE_SIZE = 1024 * 1024
+
+_SKIP_STATS_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", "logs", ".venv"}
+
+
+def _count_lines(path: Path) -> int:
+    """Count lines in a text file. Returns 0 for non-text or unreadable files."""
+    try:
+        if path.stat().st_size > _MAX_STATS_FILE_SIZE:
+            return 0
+        return len(path.read_text(encoding="utf-8").split("\n"))
+    except (UnicodeDecodeError, OSError):
+        return 0
+
+
+def _get_file_count_and_lines(dir_path: Path) -> tuple[int, int]:
+    """Count .md, .yaml, .json files and total lines in a directory tree."""
+    file_count = 0
+    total_lines = 0
+    if not dir_path.is_dir():
+        return 0, 0
+    for entry in dir_path.rglob("*"):
+        if file_count >= _MAX_STATS_FILES:
+            break
+        if entry.is_file() and entry.suffix in (".md", ".yaml", ".json"):
+            file_count += 1
+            total_lines += _count_lines(entry)
+    return file_count, total_lines
+
+
+def _recent_activity(limit: int = 10) -> list[RecentActivity]:
+    """Get recently modified .md files. Limit to 10 most recent."""
+    entries: list[tuple[str, str]] = []
+    files_scanned = 0
+    for dirpath, dirnames, filenames in os.walk(KB_ROOT):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_STATS_DIRS]
+        for fname in filenames:
+            if files_scanned >= _MAX_STATS_FILES:
+                break
+            if not fname.endswith((".md", ".yaml", ".json")):
+                continue
+            fp = Path(dirpath) / fname
+            try:
+                mtime = fp.stat().st_mtime
+                rel = fp.relative_to(KB_ROOT)
+                entries.append((str(rel).replace("\\", "/"), mtime))
+                files_scanned += 1
+            except OSError:
+                continue
+        if files_scanned >= _MAX_STATS_FILES:
+            break
+    entries.sort(key=lambda x: x[1], reverse=True)
+    from datetime import datetime, timezone
+    result = []
+    for rel, mtime in entries[:limit]:
+        iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        result.append(RecentActivity(path=rel, modified_at=iso))
+    return result
+
+
+def get_global_stats() -> GlobalStats:
+    """Compute global statistics across all projects."""
+    projects = [p for p in _list_projects().strip().split("\n") if p.startswith("- ")]
+    project_names = [p.lstrip("- ") for p in projects]
+
+    total_tasks = 0
+    backlog, in_progress, done = 0, 0, 0
+    project_stats_list: list[ProjectStats] = []
+
+    for name in project_names:
+        proj_dir = PROJECTS_DIR / name
+        fc, tl = _get_file_count_and_lines(proj_dir)
+        task_data = get_tasks(name)
+        b_count = len(task_data.get("backlog", []))
+        ip_count = len(task_data.get("in_progress", []))
+        d_count = len(task_data.get("done", []))
+
+        total_tasks += b_count + ip_count + d_count
+        backlog += b_count
+        in_progress += ip_count
+        done += d_count
+
+        project_stats_list.append(ProjectStats(
+            name=name,
+            task_counts={"backlog": b_count, "in_progress": ip_count, "done": d_count},
+            file_count=fc,
+            total_lines=tl,
+        ))
+
+    total_files, _ = _get_file_count_and_lines(KB_ROOT)
+    recent = _recent_activity(limit=10)
+
+    return GlobalStats(
+        total_projects=len(project_names),
+        total_tasks=total_tasks,
+        total_files=total_files,
+        tasks_by_status={"backlog": backlog, "in_progress": in_progress, "done": done},
+        projects=project_stats_list,
+        recent_activity=recent,
+    )
+
+
+def get_project_stats(name: str) -> ProjectStats | None:
+    """Compute statistics for a single project. Returns None if project not found."""
+    proj_dir = PROJECTS_DIR / name
+    if not proj_dir.is_dir():
+        return None
+
+    fc, tl = _get_file_count_and_lines(proj_dir)
+    task_data = get_tasks(name)
+
+    # Determine last modified
+    last_modified = None
+    try:
+        latest = max(
+            (entry.stat().st_mtime for entry in proj_dir.rglob("*") if entry.is_file()),
+            default=None,
+        )
+        if latest:
+            from datetime import datetime, timezone
+            last_modified = datetime.fromtimestamp(latest, tz=timezone.utc).isoformat()
+    except OSError:
+        pass
+
+    return ProjectStats(
+        name=name,
+        task_counts={
+            "backlog": len(task_data.get("backlog", [])),
+            "in_progress": len(task_data.get("in_progress", [])),
+            "done": len(task_data.get("done", [])),
+        },
+        file_count=fc,
+        total_lines=tl,
+        last_modified=last_modified,
+    )

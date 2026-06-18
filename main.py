@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routes import files, projects, tasks
+from routes import files, projects, stats, tasks
 
 app = FastAPI(title="KB Dashboard API", version="0.1.0")
 
@@ -17,3 +17,4 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(tasks.router)
 app.include_router(files.router)
+app.include_router(stats.router)

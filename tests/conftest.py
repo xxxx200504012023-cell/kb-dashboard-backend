@@ -29,12 +29,18 @@ def kb_root(tmp_path):
     (root / "codex" / "CODEX.md").write_text("# CODEX.md placeholder\n", encoding="utf-8")
     os.environ["KNOWLEDGE_BASE_ROOT"] = str(root)
     for mod in list(sys.modules):
-        if mod.startswith(("config", "security", "utils", "file_tools", "task_tools", "project_tools", "kb_service", "routes", "main")):
-            del sys.modules[mod]
+        if mod.startswith(("config", "security", "utils", "file_tools", "task_tools",
+                           "project_tools", "search_tools", "graph_tools", "schemas",
+                           "kb_service", "routes", "main")):
+            if mod in sys.modules:
+                del sys.modules[mod]
     yield root
     for mod in list(sys.modules):
-        if mod.startswith(("config", "security", "utils", "file_tools", "task_tools", "project_tools", "kb_service", "routes", "main")):
-            del sys.modules[mod]
+        if mod.startswith(("config", "security", "utils", "file_tools", "task_tools",
+                           "project_tools", "search_tools", "graph_tools", "schemas",
+                           "kb_service", "routes", "main")):
+            if mod in sys.modules:
+                del sys.modules[mod]
 
 
 @pytest.fixture
