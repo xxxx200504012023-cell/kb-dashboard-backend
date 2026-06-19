@@ -191,12 +191,17 @@ def _get_file_count_and_lines(dir_path: Path) -> tuple[int, int]:
     total_lines = 0
     if not dir_path.is_dir():
         return 0, 0
-    for entry in dir_path.rglob("*"):
+    for dirpath, dirnames, filenames in os.walk(dir_path):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_STATS_DIRS]
+        for fname in filenames:
+            if file_count >= _MAX_STATS_FILES:
+                break
+            entry = Path(dirpath) / fname
+            if entry.is_file() and entry.suffix in (".md", ".yaml", ".json"):
+                file_count += 1
+                total_lines += _count_lines(entry)
         if file_count >= _MAX_STATS_FILES:
             break
-        if entry.is_file() and entry.suffix in (".md", ".yaml", ".json"):
-            file_count += 1
-            total_lines += _count_lines(entry)
     return file_count, total_lines
 
 
@@ -284,10 +289,22 @@ def get_project_stats(name: str) -> ProjectStats | None:
     # Determine last modified
     last_modified = None
     try:
-        latest = max(
-            (entry.stat().st_mtime for entry in proj_dir.rglob("*") if entry.is_file()),
-            default=None,
-        )
+        latest = None
+        count = 0
+        for dirpath, dirnames, filenames in os.walk(proj_dir):
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_STATS_DIRS]
+            for fname in filenames:
+                if count >= _MAX_STATS_FILES:
+                    break
+                try:
+                    mtime = (Path(dirpath) / fname).stat().st_mtime
+                    if latest is None or mtime > latest:
+                        latest = mtime
+                    count += 1
+                except OSError:
+                    continue
+            if count >= _MAX_STATS_FILES:
+                break
         if latest:
             from datetime import datetime, timezone
             last_modified = datetime.fromtimestamp(latest, tz=timezone.utc).isoformat()
