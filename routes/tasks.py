@@ -1,6 +1,6 @@
 """Routes for /api/projects/{name}/tasks."""
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import kb_service
 from routes.helpers import sanitize_error, validate_project_name
@@ -9,11 +9,11 @@ router = APIRouter(prefix="/api/projects", tags=["tasks"])
 
 
 class ClaimTaskRequest(BaseModel):
-    assigned_to: str = "claude-code"
+    assigned_to: str = Field(default="claude-code", max_length=100)
 
 
 class CompleteTaskRequest(BaseModel):
-    summary: str = ""
+    summary: str = Field(default="", max_length=2000)
 
 
 @router.get("/{name}/tasks")

@@ -17,6 +17,7 @@ from project_tools import _list_projects, _init_project             # noqa: E402
 from security import SecurityError                                    # noqa: E402
 from config import PROJECTS_DIR, KB_ROOT                            # noqa: E402
 from schemas import GlobalStats, ProjectStats, RecentActivity        # noqa: E402
+from ws_manager import _schedule, broadcast, publish                   # noqa: E402
 
 _TASKS_DIR = PROJECTS_DIR.parent / "tasks"
 
@@ -37,6 +38,7 @@ def init_project(name: str, project_type: str = "backend") -> dict:
         return {"error": raw}
     lines = raw.strip().split("\n")
     created = [line.lstrip("  + ") for line in lines if line.startswith("  +")]
+    _schedule(broadcast("project_created", {"name": name}))
     return {"name": name, "created": created}
 
 
@@ -155,7 +157,10 @@ def claim_task(task_id: str, assigned_to: str = "claude-code", project: str | No
         task_project = _get_task_project(task_id)
         if task_project and task_project != project:
             return f"ERROR: Task '{task_id}' does not belong to project '{project}'"
-    return _task_claim(task_id, assigned_to)
+    result = _task_claim(task_id, assigned_to)
+    if not result.startswith("ERROR:") and project:
+        _schedule(publish(project, "task_claimed", {"task_id": task_id, "assigned_to": assigned_to}))
+    return result
 
 
 def complete_task(task_id: str, summary: str = "", project: str | None = None) -> str:
@@ -164,7 +169,11 @@ def complete_task(task_id: str, summary: str = "", project: str | None = None) -
         task_project = _get_task_project(task_id)
         if task_project and task_project != project:
             return f"ERROR: Task '{task_id}' does not belong to project '{project}'"
-    return _task_complete(task_id, summary)
+    result = _task_complete(task_id, summary)
+    if not result.startswith("ERROR:") and project:
+        _schedule(publish(project, "task_completed", {"task_id": task_id, "summary": summary}))
+        _schedule(publish(project, "project_stats_updated", {}))
+    return result
 
 
 # -- Stats Aggregation --
@@ -207,7 +216,7 @@ def _get_file_count_and_lines(dir_path: Path) -> tuple[int, int]:
 
 def _recent_activity(limit: int = 10) -> list[RecentActivity]:
     """Get recently modified .md files. Limit to 10 most recent."""
-    entries: list[tuple[str, str]] = []
+    entries: list[tuple[str, float]] = []
     files_scanned = 0
     for dirpath, dirnames, filenames in os.walk(KB_ROOT):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_STATS_DIRS]
@@ -237,8 +246,7 @@ def _recent_activity(limit: int = 10) -> list[RecentActivity]:
 
 def get_global_stats() -> GlobalStats:
     """Compute global statistics across all projects."""
-    projects = [p for p in _list_projects().strip().split("\n") if p.startswith("- ")]
-    project_names = [p.lstrip("- ") for p in projects]
+    project_names = list_projects()
 
     total_tasks = 0
     backlog, in_progress, done = 0, 0, 0

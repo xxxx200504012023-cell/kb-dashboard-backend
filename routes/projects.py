@@ -1,6 +1,6 @@
 """Routes for /api/projects."""
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import kb_service
 from routes.helpers import sanitize_error, validate_project_name
@@ -9,8 +9,8 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
 class CreateProjectRequest(BaseModel):
-    name: str
-    project_type: str = "backend"
+    name: str = Field(..., max_length=100)
+    project_type: str = Field(default="backend", max_length=20)
 
 
 @router.get("")

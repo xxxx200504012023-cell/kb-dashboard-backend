@@ -13,7 +13,7 @@ def _validate_file_path(path: str) -> str | None:
     """Validate and normalize file path. Returns error or None."""
     if not path or path.startswith("/"):
         return "Invalid file path"
-    if ".." in path.split("/"):
+    if ".." in path.replace("\\", "/").split("/"):
         return "Path traversal blocked"
     if "\x00" in path:
         return "Path contains null byte"
@@ -22,7 +22,7 @@ def _validate_file_path(path: str) -> str | None:
     return None
 
 
-def _validate_project(name: str, handler: str) -> None:
+def _validate_project(name: str) -> None:
     """Validate project name and raise HTTPException on failure."""
     err = validate_project_name(name)
     if err:
@@ -32,8 +32,12 @@ def _validate_project(name: str, handler: str) -> None:
 async def _read_body_bounded(request: Request, max_size: int = MAX_CONTENT_SIZE) -> bytes:
     """Read request body with a hard size cap using stream() to prevent DoS."""
     content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > max_size:
-        raise HTTPException(status_code=413, detail="Content too large")
+    if content_length:
+        try:
+            if int(content_length) > max_size:
+                raise HTTPException(status_code=413, detail="Content too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header")
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
@@ -44,7 +48,7 @@ async def _read_body_bounded(request: Request, max_size: int = MAX_CONTENT_SIZE)
 
 @router.get("/{name}/files/{path:path}")
 def read_file(name: str, path: str):
-    _validate_project(name, "read_file")
+    _validate_project(name)
     err = _validate_file_path(path)
     if err:
         raise HTTPException(status_code=400, detail=err)
@@ -58,7 +62,7 @@ def read_file(name: str, path: str):
 
 @router.put("/{name}/files/{path:path}")
 async def write_file(name: str, path: str, request: Request):
-    _validate_project(name, "write_file")
+    _validate_project(name)
     err = _validate_file_path(path)
     if err:
         raise HTTPException(status_code=400, detail=err)
@@ -74,7 +78,7 @@ async def write_file(name: str, path: str, request: Request):
 
 
 @router.get("/{name}/search")
-def search_files(name: str, q: str = Query(..., min_length=1)):
-    _validate_project(name, "search_files")
+def search_files(name: str, q: str = Query(..., min_length=1, max_length=500)):
+    _validate_project(name)
     results = kb_service.search_files(q, name)
     return {"query": q, "results": results}
