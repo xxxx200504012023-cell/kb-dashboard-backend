@@ -1,5 +1,6 @@
 """Service layer wrapping KB MCP Server modules for the dashboard backend."""
 
+import difflib
 import os
 import re
 import sys
@@ -14,10 +15,12 @@ os.environ.setdefault("KNOWLEDGE_BASE_ROOT", "E:/knowledge-base")
 from file_tools import _read_file, _write_file, _search_kb        # noqa: E402
 from task_tools import _task_status, _task_next, _task_claim, _task_complete  # noqa: E402
 from project_tools import _list_projects, _init_project             # noqa: E402
-from security import SecurityError                                    # noqa: E402
-from config import PROJECTS_DIR, KB_ROOT                            # noqa: E402
+from security import SecurityError, resolve_kb_path                      # noqa: E402
+from config import PROJECTS_DIR, KB_ROOT, MAX_SEARCH_FILES, MAX_SEARCH_FILE_SIZE  # noqa: E402
 from schemas import GlobalStats, ProjectStats, RecentActivity        # noqa: E402
-from ws_manager import _schedule, broadcast, publish                   # noqa: E402
+from utils import parse_frontmatter                                  # noqa: E402
+from ws_manager import _schedule, broadcast, publish           # noqa: E402
+import ws_events                                                # noqa: E402
 
 _TASKS_DIR = PROJECTS_DIR.parent / "tasks"
 
@@ -38,7 +41,7 @@ def init_project(name: str, project_type: str = "backend") -> dict:
         return {"error": raw}
     lines = raw.strip().split("\n")
     created = [line.lstrip("  + ") for line in lines if line.startswith("  +")]
-    _schedule(broadcast("project_created", {"name": name}))
+    _schedule(broadcast(ws_events.PROJECT_CREATED, {"name": name}))
     return {"name": name, "created": created}
 
 
@@ -69,6 +72,8 @@ def get_project(name: str) -> dict | None:
     files = []
     for entry in sorted(proj_dir.rglob("*")):
         rel = str(entry.relative_to(proj_dir))
+        if ".history" in Path(rel).parts:
+            continue
         if entry.is_dir():
             files.append(rel + "/")
         else:
@@ -83,7 +88,10 @@ def read_file(path: str, project: str | None) -> str:
 
 def write_file(path: str, content: str, project: str | None) -> str:
     """Write content to a file in a KB project."""
-    return _write_file(path, content, project)
+    result = _write_file(path, content, project)
+    if project and not result.startswith("ERROR:"):
+        _schedule(publish(project, ws_events.FILE_WRITTEN, {"path": path}))
+    return result
 
 
 def search_files(query: str, project: str | None) -> list[dict]:
@@ -103,6 +111,59 @@ def search_files(query: str, project: str | None) -> list[dict]:
     if current:
         results.append(current)
     return results
+
+
+def get_file_diff(project: str, file_path: str, version: str | None = None) -> dict | None:
+    """Generate unified diff between current file and a historical version.
+
+    Returns dict with current, previous, versions list, and diff text.
+    Returns None if the file does not exist.
+    """
+    current_path = resolve_kb_path(project, file_path)
+    if not current_path.exists():
+        return None
+
+    history_dir = current_path.parent / ".history" / current_path.name
+    versions: list[str] = []
+    if history_dir.is_dir():
+        entries = sorted(history_dir.iterdir(), key=lambda p: p.name, reverse=True)
+        versions = [p.name for p in entries if p.is_file() and p.name.endswith(".md")]
+
+    if not versions:
+        return {
+            "current": str(current_path.relative_to(current_path.parents[1])),
+            "previous": None,
+            "versions": [],
+            "diff": "",
+        }
+
+    previous_name = version if version else versions[0]
+    previous_path = history_dir / previous_name
+    if not previous_path.exists():
+        previous_name = versions[0]
+        previous_path = history_dir / previous_name
+
+    MAX_DIFF_SIZE = 5 * 1024 * 1024  # 5 MB
+    if current_path.stat().st_size > MAX_DIFF_SIZE or previous_path.stat().st_size > MAX_DIFF_SIZE:
+        raise SecurityError("File too large for diff comparison")
+
+    previous_lines = previous_path.read_text("utf-8").splitlines(keepends=True)
+    current_lines = current_path.read_text("utf-8").splitlines(keepends=True)
+
+    diff_text = "".join(difflib.unified_diff(
+        previous_lines,
+        current_lines,
+        fromfile=str(previous_path.relative_to(current_path.parents[2])),
+        tofile=str(current_path.relative_to(current_path.parents[1])),
+        lineterm="",
+    ))
+
+    return {
+        "current": str(current_path.relative_to(current_path.parents[1])),
+        "previous": previous_name,
+        "versions": versions,
+        "diff": diff_text,
+    }
 
 
 def get_tasks(project: str) -> dict:
@@ -159,7 +220,7 @@ def claim_task(task_id: str, assigned_to: str = "claude-code", project: str | No
             return f"ERROR: Task '{task_id}' does not belong to project '{project}'"
     result = _task_claim(task_id, assigned_to)
     if not result.startswith("ERROR:") and project:
-        _schedule(publish(project, "task_claimed", {"task_id": task_id, "assigned_to": assigned_to}))
+        _schedule(publish(project, ws_events.TASK_CLAIMED, {"task_id": task_id, "assigned_to": assigned_to}))
     return result
 
 
@@ -171,9 +232,64 @@ def complete_task(task_id: str, summary: str = "", project: str | None = None) -
             return f"ERROR: Task '{task_id}' does not belong to project '{project}'"
     result = _task_complete(task_id, summary)
     if not result.startswith("ERROR:") and project:
-        _schedule(publish(project, "task_completed", {"task_id": task_id, "summary": summary}))
-        _schedule(publish(project, "project_stats_updated", {}))
+        _schedule(publish(project, ws_events.TASK_COMPLETED, {"task_id": task_id, "summary": summary}))
+        _schedule(publish(project, ws_events.PROJECT_STATS_UPDATED, {}))
     return result
+
+
+def get_dependencies(project: str) -> dict:
+    """Build a DAG of task dependencies for a project.
+
+    Returns {"nodes": [...], "edges": [...]} where each node has {id, title, status}
+    and each edge has {from, to} representing a depends_on relationship.
+    """
+    import time
+
+    deadline = time.perf_counter() + 5
+    stage_map = {"backlog": "pending", "in-progress": "in_progress", "done": "done"}
+    nodes: list[dict] = []
+    edges: list[dict] = []
+    files_scanned = 0
+
+    for stage_dir, status in stage_map.items():
+        stage_path = _TASKS_DIR / stage_dir
+        if not stage_path.is_dir():
+            continue
+        for task_file in sorted(stage_path.glob("*.md")):
+            if files_scanned >= MAX_SEARCH_FILES or time.perf_counter() > deadline:
+                break
+            if task_file.stat().st_size > MAX_SEARCH_FILE_SIZE:
+                files_scanned += 1
+                continue
+            try:
+                text = task_file.read_text(encoding="utf-8")
+            except OSError:
+                print(f"[WARN] Skipping unreadable task file: {task_file.name}", file=sys.stderr)
+                files_scanned += 1
+                continue
+            files_scanned += 1
+            meta, body = parse_frontmatter(text)
+            if meta.get("project") != project:
+                continue
+            task_id = meta.get("id")
+            if not task_id:
+                continue
+            title = ""
+            for line in body.splitlines():
+                if line.startswith("# "):
+                    title = line[2:].strip()
+                    break
+            nodes.append({"id": task_id, "title": title, "status": status})
+            depends = meta.get("depends_on")
+            if isinstance(depends, list):
+                for dep_id in depends:
+                    dep_id = str(dep_id).strip()
+                    if dep_id:
+                        edges.append({"from": dep_id, "to": task_id})
+        if files_scanned >= MAX_SEARCH_FILES or time.perf_counter() > deadline:
+            break
+
+    return {"nodes": nodes, "edges": edges}
 
 
 # -- Stats Aggregation --

@@ -1,4 +1,5 @@
 """Routes for /api/projects/{name}/files."""
+import re
 from fastapi import APIRouter, HTTPException, Request, Query, Response
 
 import kb_service
@@ -7,6 +8,7 @@ from routes.helpers import sanitize_error, validate_project_name
 router = APIRouter(prefix="/api/projects", tags=["files"])
 
 MAX_CONTENT_SIZE = 10 * 1024 * 1024  # 10 MB
+_VERSION_RE = re.compile(r"^\d{8}T\d{6}Z\.md$")
 
 
 def _validate_file_path(path: str) -> str | None:
@@ -44,6 +46,20 @@ async def _read_body_bounded(request: Request, max_size: int = MAX_CONTENT_SIZE)
         if len(body) > max_size:
             raise HTTPException(status_code=413, detail="Content too large")
     return bytes(body)
+
+
+@router.get("/{name}/files/{path:path}/diff")
+def file_diff(name: str, path: str, version: str | None = Query(default=None)):
+    _validate_project(name)
+    err = _validate_file_path(path)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    if version is not None and not _VERSION_RE.match(version):
+        raise HTTPException(status_code=400, detail="Invalid version format")
+    result = kb_service.get_file_diff(name, path, version)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    return result
 
 
 @router.get("/{name}/files/{path:path}")

@@ -8,4 +8,5 @@ wheels/
 
 # Virtual environments
 .venv
-.pytest_tmp/
+.pytest_tmp*/
+.coverage

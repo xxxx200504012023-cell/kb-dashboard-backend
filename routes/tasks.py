@@ -24,6 +24,14 @@ def get_tasks(name: str):
     return kb_service.get_tasks(name)
 
 
+@router.get("/{name}/dependencies")
+def get_dependencies(name: str):
+    err = validate_project_name(name)
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    return kb_service.get_dependencies(name)
+
+
 @router.post("/{name}/tasks/{task_id}/claim")
 def claim_task(name: str, task_id: str, body: ClaimTaskRequest | None = None):
     err = validate_project_name(name)

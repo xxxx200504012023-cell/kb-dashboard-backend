@@ -1,5 +1,4 @@
 """Tests for /api/projects routes."""
-import pytest
 
 
 class TestListProjects:

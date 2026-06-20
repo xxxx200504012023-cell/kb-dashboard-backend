@@ -1,8 +1,8 @@
 """Tests for kb_service.py — wraps KB MCP modules."""
-from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from conftest import create_task_file
+from helpers import create_task_file
 
 
 @pytest.fixture
@@ -85,6 +85,27 @@ class TestWriteFile:
         proj.mkdir()
         result = kb_service.write_file("big.md", "x" * 11_000_000, "app")
         assert "ERROR" in result
+
+    def test_write_publishes_event(self, kb_service, kb_root):
+        proj = kb_root / "projects" / "app"
+        proj.mkdir()
+        with patch.object(kb_service, "_schedule") as mock_schedule:
+            result = kb_service.write_file("notes.md", "# Notes", "app")
+            assert "OK" in result
+            mock_schedule.assert_called_once()
+
+    def test_write_no_publish_on_error(self, kb_service, kb_root):
+        proj = kb_root / "projects" / "app"
+        proj.mkdir()
+        with patch.object(kb_service, "_schedule") as mock_schedule:
+            kb_service.write_file("big.md", "x" * 11_000_000, "app")
+            mock_schedule.assert_not_called()
+
+    def test_write_no_publish_without_project(self, kb_service, kb_root):
+        with patch.object(kb_service, "_schedule") as mock_schedule:
+            result = kb_service.write_file("orphan.md", "# No project", None)
+            assert "OK" in result
+            mock_schedule.assert_not_called()
 
 
 class TestSearchFiles:
